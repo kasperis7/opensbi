@@ -110,24 +110,15 @@ static int switch_to_next_domain_context(struct hart_context *ctx,
 {
 	u32 hartindex = current_hartindex();
 	struct sbi_trap_context *trap_ctx;
-	struct sbi_domain *current_dom, *target_dom;
+	struct sbi_domain *target_dom;
 	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
 
 	if (!ctx || !dom_ctx || ctx == dom_ctx)
 		return SBI_EINVAL;
 
-	current_dom = ctx->dom;
 	target_dom = dom_ctx->dom;
 	/* Assign current hart to target domain */
-	spin_lock(&current_dom->assigned_harts_lock);
-	sbi_hartmask_clear_hartindex(hartindex, &current_dom->assigned_harts);
-	spin_unlock(&current_dom->assigned_harts_lock);
-
-	sbi_update_hartindex_to_domain(hartindex, target_dom);
-
-	spin_lock(&target_dom->assigned_harts_lock);
-	sbi_hartmask_set_hartindex(hartindex, &target_dom->assigned_harts);
-	spin_unlock(&target_dom->assigned_harts_lock);
+	sbi_domain_assign_hart(hartindex, target_dom);
 
 	/* Save current CSR context and restore target domain's CSR context */
 	ctx->sstatus	= csr_swap(CSR_SSTATUS, dom_ctx->sstatus);

@@ -318,8 +318,6 @@ int sbi_hsm_hart_start(struct sbi_scratch *scratch,
 	/* For now, we only allow start mode to be S-mode or U-mode. */
 	if (smode != PRV_S && smode != PRV_U)
 		return SBI_EINVAL;
-	if (dom && !sbi_domain_is_assigned_hart(dom, hartindex))
-		return SBI_EINVAL;
 	if (dom && !sbi_domain_check_addr(dom, saddr, smode,
 					  SBI_DOMAIN_EXECUTE))
 		return SBI_EINVALID_ADDR;
@@ -329,8 +327,18 @@ int sbi_hsm_hart_start(struct sbi_scratch *scratch,
 		return SBI_EINVAL;
 
 	hdata = sbi_scratch_offset_ptr(rscratch, hart_data_offset);
-	if (!hsm_start_ticket_acquire(hdata))
+
+	/* Serialize ownership validation with acceptance of this HART_START. */
+	sbi_domain_assignment_lock();
+	if (dom && !sbi_domain_check_hart_assignment_locked(dom, hartindex,
+							    NULL)) {
+		sbi_domain_assignment_unlock();
 		return SBI_EINVAL;
+	}
+	if (!hsm_start_ticket_acquire(hdata)) {
+		sbi_domain_assignment_unlock();
+		return SBI_EINVAL;
+	}
 
 	init_count = sbi_init_count(hartindex);
 	entry_count = sbi_entry_count(hartindex);
@@ -346,6 +354,7 @@ int sbi_hsm_hart_start(struct sbi_scratch *scratch,
 	 */
 	hstate = atomic_cmpxchg(&hdata->state, SBI_HSM_STATE_STOPPED,
 				SBI_HSM_STATE_START_PENDING);
+	sbi_domain_assignment_unlock();
 	if (hstate == SBI_HSM_STATE_STARTED) {
 		rc = SBI_EALREADY;
 		goto err;
