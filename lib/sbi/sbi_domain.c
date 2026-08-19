@@ -37,6 +37,8 @@ struct sbi_domain root = {
 
 static unsigned long domain_hart_ptr_offset;
 
+static spinlock_t domain_assignment_lock = SPIN_LOCK_INITIALIZER;
+
 struct sbi_domain *sbi_hartindex_to_domain(u32 hartindex)
 {
 	struct sbi_scratch *scratch;
@@ -57,6 +59,78 @@ void sbi_update_hartindex_to_domain(u32 hartindex, struct sbi_domain *dom)
 		return;
 
 	sbi_scratch_write_type(scratch, void *, domain_hart_ptr_offset, dom);
+}
+
+void sbi_domain_assignment_lock(void)
+{
+	spin_lock(&domain_assignment_lock);
+}
+
+void sbi_domain_assignment_unlock(void)
+{
+	spin_unlock(&domain_assignment_lock);
+}
+
+static void __sbi_domain_assign_hart_locked(u32 hartindex,
+					    struct sbi_domain *dom)
+{
+	struct sbi_domain *current_dom;
+
+	current_dom = sbi_hartindex_to_domain(hartindex);
+	if (current_dom) {
+		spin_lock(&current_dom->assigned_harts_lock);
+		sbi_hartmask_clear_hartindex(hartindex,
+						&current_dom->assigned_harts);
+		spin_unlock(&current_dom->assigned_harts_lock);
+	}
+	sbi_update_hartindex_to_domain(hartindex, dom);
+	if (dom) {
+		spin_lock(&dom->assigned_harts_lock);
+		sbi_hartmask_set_hartindex(hartindex, &dom->assigned_harts);
+		spin_unlock(&dom->assigned_harts_lock);
+	}
+}
+
+void sbi_domain_assign_hart(u32 hartindex, struct sbi_domain *dom)
+{
+	sbi_domain_assignment_lock();
+	__sbi_domain_assign_hart_locked(hartindex, dom);
+	sbi_domain_assignment_unlock();
+}
+
+bool sbi_domain_check_hart_assignment_locked(const struct sbi_domain *dom,
+						     u32 hartindex,
+						     struct sbi_domain **mapped_dom)
+{
+	bool assigned;
+	struct sbi_domain *mapped;
+
+	mapped = sbi_hartindex_to_domain(hartindex);
+	assigned = false;
+	if (dom && mapped == dom) {
+		spin_lock(&mapped->assigned_harts_lock);
+		assigned = sbi_hartmask_test_hartindex(hartindex,
+						      &mapped->assigned_harts);
+		spin_unlock(&mapped->assigned_harts_lock);
+	}
+	if (mapped_dom)
+		*mapped_dom = mapped;
+
+	return assigned;
+}
+
+bool sbi_domain_check_hart_assignment(const struct sbi_domain *dom,
+					      u32 hartindex,
+					      struct sbi_domain **mapped_dom)
+{
+	bool assigned;
+
+	sbi_domain_assignment_lock();
+	assigned = sbi_domain_check_hart_assignment_locked(dom, hartindex,
+						   mapped_dom);
+	sbi_domain_assignment_unlock();
+
+	return assigned;
 }
 
 bool sbi_domain_is_assigned_hart(const struct sbi_domain *dom, u32 hartindex)
@@ -668,12 +742,7 @@ int sbi_domain_register(struct sbi_domain *dom,
 		if (!sbi_hartmask_test_hartindex(i, dom->possible_harts))
 			continue;
 
-		tdom = sbi_hartindex_to_domain(i);
-		if (tdom)
-			sbi_hartmask_clear_hartindex(i,
-					&tdom->assigned_harts);
-		sbi_update_hartindex_to_domain(i, dom);
-		sbi_hartmask_set_hartindex(i, &dom->assigned_harts);
+		sbi_domain_assign_hart(i, dom);
 
 		/*
 		 * If cold boot HART is assigned to this domain then

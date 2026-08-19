@@ -228,6 +228,25 @@ struct sbi_domain *sbi_hartindex_to_domain(u32 hartindex);
 /** Update HART local pointer to point to specified domain */
 void sbi_update_hartindex_to_domain(u32 hartindex, struct sbi_domain *dom);
 
+/** Atomically assign HART to specified domain */
+void sbi_domain_assign_hart(u32 hartindex, struct sbi_domain *dom);
+
+/** Lock domain assignment state for a compound operation */
+void sbi_domain_assignment_lock(void);
+
+/** Unlock domain assignment state after a compound operation */
+void sbi_domain_assignment_unlock(void);
+
+/** Check HART assignment while domain assignment lock is held */
+bool sbi_domain_check_hart_assignment_locked(const struct sbi_domain *dom,
+					     u32 hartindex,
+					     struct sbi_domain **mapped_dom);
+
+/** Atomically check HART assignment and return its mapped domain */
+bool sbi_domain_check_hart_assignment(const struct sbi_domain *dom,
+				      u32 hartindex,
+				      struct sbi_domain **mapped_dom);
+
 /** Get pointer to sbi_domain for current HART */
 #define sbi_domain_thishart_ptr() \
 	sbi_hartindex_to_domain(current_hartindex())
