@@ -225,11 +225,23 @@ struct sbi_domain {
 /** The root domain instance */
 extern struct sbi_domain root;
 
+/**
+ * Global lock serializing updates to HART to domain assignments
+ *
+ * A HART to domain assignment is represented by the per-HART scratch
+ * pointer and the per-domain assigned_harts bitmap. Both are updated
+ * under this lock so that readers never observe the two disagreeing.
+ */
+extern spinlock_t domain_hart_assign_lock;
+
 /** Get pointer to sbi_domain from HART index */
-struct sbi_domain *sbi_hartindex_to_domain(u32 hartindex);
+struct sbi_domain *sbi_hartindex_to_domain(u32 hartindex)
+	MUST_NOT_HOLD(&domain_hart_assign_lock);
 
 /** Update HART local pointer to point to specified domain */
-void sbi_update_hartindex_to_domain(u32 hartindex, struct sbi_domain *dom);
+void sbi_update_hartindex_to_domain(u32 hartindex, struct sbi_domain *dom)
+	MUST_NOT_HOLD(&domain_hart_assign_lock)
+	MUST_NOT_HOLD(&dom->assigned_harts_lock);
 
 /** Get pointer to sbi_domain for current HART */
 #define sbi_domain_thishart_ptr() \

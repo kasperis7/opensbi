@@ -34,6 +34,7 @@ struct sbi_domain root = {
 };
 
 static unsigned long domain_hart_ptr_offset;
+DEFINE_SPIN_LOCK(domain_hart_assign_lock);
 
 struct sbi_domain_notify_entry {
 	struct sbi_dlist		node;
@@ -104,25 +105,46 @@ static int sbi_domain_notify_all(struct sbi_domain *dom, enum sbi_domain_notify_
 }
 
 struct sbi_domain *sbi_hartindex_to_domain(u32 hartindex)
+	MUST_NOT_HOLD(&domain_hart_assign_lock)
 {
 	struct sbi_scratch *scratch;
+	struct sbi_domain *dom;
 
 	scratch = sbi_hartindex_to_scratch(hartindex);
 	if (!scratch || !domain_hart_ptr_offset)
 		return NULL;
 
-	return sbi_scratch_read_type(scratch, void *, domain_hart_ptr_offset);
+	spin_lock(&domain_hart_assign_lock);
+	dom = sbi_scratch_read_type(scratch, void *, domain_hart_ptr_offset);
+	spin_unlock(&domain_hart_assign_lock);
+	return dom;
 }
 
 void sbi_update_hartindex_to_domain(u32 hartindex, struct sbi_domain *dom)
+	MUST_NOT_HOLD(&domain_hart_assign_lock)
+	MUST_NOT_HOLD(&dom->assigned_harts_lock)
 {
+	struct sbi_domain *current_dom;
 	struct sbi_scratch *scratch;
 
 	scratch = sbi_hartindex_to_scratch(hartindex);
-	if (!scratch)
+	if (!scratch || !domain_hart_ptr_offset)
 		return;
 
+	spin_lock(&domain_hart_assign_lock);
+	current_dom = sbi_scratch_read_type(scratch, void *, domain_hart_ptr_offset);
+	if (current_dom) {
+		spin_lock(&current_dom->assigned_harts_lock);
+		sbi_hartmask_clear_hartindex(hartindex, &current_dom->assigned_harts);
+		spin_unlock(&current_dom->assigned_harts_lock);
+	}
 	sbi_scratch_write_type(scratch, void *, domain_hart_ptr_offset, dom);
+	if (dom) {
+		spin_lock(&dom->assigned_harts_lock);
+		sbi_hartmask_set_hartindex(hartindex, &dom->assigned_harts);
+		spin_unlock(&dom->assigned_harts_lock);
+	}
+	spin_unlock(&domain_hart_assign_lock);
 }
 
 bool sbi_domain_is_assigned_hart(const struct sbi_domain *dom, u32 hartindex)
@@ -748,7 +770,9 @@ int sbi_domain_register(struct sbi_domain *dom)
 	SPIN_LOCK_INIT(dom->assigned_harts_lock);
 
 	/* Clear assigned HARTs of domain */
+	spin_lock(&dom->assigned_harts_lock);
 	sbi_hartmask_clear_all(&dom->assigned_harts);
+	spin_unlock(&dom->assigned_harts_lock);
 
 	/*
 	 * Assign HART to a domain with the least initialization order
@@ -756,15 +780,10 @@ int sbi_domain_register(struct sbi_domain *dom)
 	 */
 	sbi_hartmask_for_each_hartindex(i, dom->possible_harts) {
 		tdom = sbi_hartindex_to_domain(i);
-		if (tdom) {
-			if (tdom->init_order > dom->init_order)
-				sbi_hartmask_clear_hartindex(i, &tdom->assigned_harts);
-			else
-				continue;
-		}
+		if (tdom && tdom->init_order <= dom->init_order)
+			continue;
 
 		sbi_update_hartindex_to_domain(i, dom);
-		sbi_hartmask_set_hartindex(i, &dom->assigned_harts);
 
 		/*
 		 * If cold boot HART is assigned to this domain then
