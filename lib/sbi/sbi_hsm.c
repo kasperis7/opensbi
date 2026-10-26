@@ -318,19 +318,35 @@ int sbi_hsm_hart_start(struct sbi_scratch *scratch,
 	/* For now, we only allow start mode to be S-mode or U-mode. */
 	if (smode != PRV_S && smode != PRV_U)
 		return SBI_EINVAL;
-	if (dom && !sbi_domain_is_assigned_hart(dom, hartindex))
-		return SBI_EINVAL;
-	if (dom && !sbi_domain_check_addr(dom, saddr, smode,
-					  SBI_DOMAIN_EXECUTE))
-		return SBI_EINVALID_ADDR;
 
 	rscratch = sbi_hartindex_to_scratch(hartindex);
 	if (!rscratch)
 		return SBI_EINVAL;
 
 	hdata = sbi_scratch_offset_ptr(rscratch, hart_data_offset);
-	if (!hsm_start_ticket_acquire(hdata))
+
+	/*
+	 * Serialize domain ownership validation with acceptance of this
+	 * start request, so that a concurrent reassignment of the target
+	 * HART cannot slip in between the check and the state transition.
+	 *
+	 * The lock is dropped before the HART is actually started because
+	 * that may immediately run code on the target HART.
+	 */
+	spin_lock(&domain_hart_assign_lock);
+	if (dom && !sbi_domain_is_assigned_hart(dom, hartindex)) {
+		spin_unlock(&domain_hart_assign_lock);
 		return SBI_EINVAL;
+	}
+	if (dom && !sbi_domain_check_addr(dom, saddr, smode,
+					  SBI_DOMAIN_EXECUTE)) {
+		spin_unlock(&domain_hart_assign_lock);
+		return SBI_EINVALID_ADDR;
+	}
+	if (!hsm_start_ticket_acquire(hdata)) {
+		spin_unlock(&domain_hart_assign_lock);
+		return SBI_EINVAL;
+	}
 
 	/*
 	 * Ensure target hart is in correct state before updating
@@ -339,7 +355,7 @@ int sbi_hsm_hart_start(struct sbi_scratch *scratch,
 	hstate = atomic_read(&hdata->state);
 	if (hstate != SBI_HSM_STATE_STOPPED) {
 		rc = hstate == SBI_HSM_STATE_STARTED ? SBI_EALREADY : SBI_EINVAL;
-		goto err;
+		goto err_unlock;
 	}
 
 	init_count = sbi_init_count(hartindex);
@@ -356,6 +372,7 @@ int sbi_hsm_hart_start(struct sbi_scratch *scratch,
 	 */
 	hstate = atomic_cmpxchg(&hdata->state, SBI_HSM_STATE_STOPPED,
 				SBI_HSM_STATE_START_PENDING);
+	spin_unlock(&domain_hart_assign_lock);
 	if (hstate != SBI_HSM_STATE_STOPPED) {
 		rc = hstate == SBI_HSM_STATE_STARTED ? SBI_EALREADY : SBI_EINVAL;
 		goto err;
@@ -376,6 +393,10 @@ int sbi_hsm_hart_start(struct sbi_scratch *scratch,
 				    SBI_HSM_STATE_STOPPED);
 err:
 	hsm_start_ticket_release(hdata);
+	return rc;
+err_unlock:
+	hsm_start_ticket_release(hdata);
+	spin_unlock(&domain_hart_assign_lock);
 	return rc;
 }
 
